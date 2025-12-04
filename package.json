@@ -1,0 +1,21 @@
+{
+  "name": "lovable_test3_tool_calling",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "fs-extra": "^11.3.2",
+    "openai": "^6.9.1",
+    "tar": "^7.5.2"
+  }
+}
