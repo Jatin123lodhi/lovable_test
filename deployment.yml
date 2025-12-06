@@ -15,5 +15,4 @@ spec:
       containers:
         - name: react-app
           image: cryptocal/react_base_img:latest
-          ports:
-            - containerPort: 3000
+          command: ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
