@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: caddy-config
+  namespace: default
+data:
+  Caddyfile: |
+    http://*.lovableaiweb.info {
+      reverse_proxy service-{http.request.host.labels.2}.default.svc.cluster.local:5173
+    }
+
+    http://lovableaiweb.info {
+      respond "Welcome to Caddy Gateway!!!!" 200
+    }
+
