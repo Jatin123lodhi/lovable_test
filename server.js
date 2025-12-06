@@ -346,7 +346,9 @@ async function getFolderMetadata(podName, namespace) {
 
 // simple endpoint demonstrating the agent loop
 app.post("/agent", async (req, res) => {
+  console.log(`[AGENT] New request received`);
   const userPrompt = req.body.prompt || "Please inspect the repo and ask for any file you need.";
+  
   const namespace = process.env.NAMESPACE || "default";
   const labelSelector = process.env.LABEL_SELECTOR || "app=react-app";
 
@@ -355,6 +357,7 @@ app.post("/agent", async (req, res) => {
   try {
     podName = await getPodName(namespace, labelSelector);
   } catch (err) {
+    console.error(`[AGENT] ERROR: Failed to find pod: ${err.message}`);
     return res.status(400).json({ error: `Failed to find pod: ${err.message}` });
   }
 
@@ -381,123 +384,133 @@ app.post("/agent", async (req, res) => {
     let currentMessage = currentResponse.choices?.[0]?.message;
     const toolExecutions = []; // Track all tool executions
 
+    // need to add logs and max iterations to prevent infinite tool calls
+    const MAX_ITERATIONS = 20;
+    let iterationCount = 0;
+
     // Keep processing tool calls until model returns a final response
     while (currentMessage?.tool_calls && currentMessage.tool_calls.length > 0) {
-      const toolCall = currentMessage.tool_calls[0]; // Get first tool call
-      const fnName = toolCall.function.name;
-      const rawArgs = toolCall.function.arguments || "{}";
+      iterationCount++;
+      console.log(`[AGENT] Iteration ${iterationCount} - Processing ${currentMessage.tool_calls.length} tool call(s)`);
       
-      let args = {};
-      try { 
-        args = JSON.parse(rawArgs); 
-      } catch (e) {
-        args = { path: rawArgs }; // fallback if model returned plain string
+      if(iterationCount > MAX_ITERATIONS) {
+        console.error(`[AGENT] ERROR: Max iterations (${MAX_ITERATIONS}) reached!`);
+        return res.status(500).json({ 
+          error: "Max iterations reached", 
+          lastMessage: currentMessage 
+        });
       }
-
-      // Add the assistant's tool call message to history
+      
+      // Add the assistant's tool call message to history ONCE per iteration
       messages.push(currentMessage);
-
-      let toolResult;
       
-      if (fnName === "read_file") {
-        const filePath = args.path;
-        // execute the tool (read file from pod)
-        toolResult = await readFileFromPod(podName, namespace, filePath);
+      // Process each tool call
+      for (const toolCall of currentMessage.tool_calls) {
+        // Process each tool call
+        const fnName = toolCall.function.name;
+        const rawArgs = toolCall.function.arguments || "{}";
         
-        // Track execution for response
-        toolExecutions.push({ 
-          function: fnName, 
-          args, 
-          filePreview: toolResult.slice(0, 1000) 
-        });
-      } 
-      else if (fnName === 'write_file') {
-        const filePath = args.path;
-        const fileContent = args.content;
-        
-        // execute the tool (write file to pod)
-        toolResult = await writeFileInPod(podName, namespace, filePath, fileContent);
-        console.log(`[WRITE_FILE] Result: ${toolResult}`);
-        
-        // Track execution for response
-        toolExecutions.push({ 
-          function: fnName, 
-          args, 
-          result: toolResult 
-        });
-      }
-      else if (fnName === 'list_directory') {
-        const dirPath = args.path || '/app';
-        
-        // execute the tool (list directory in pod)
-        toolResult = await listDirectoryInPod(podName, namespace, dirPath);
-        console.log(`[LIST_DIRECTORY] Path: ${dirPath}`);
-        console.log(`[LIST_DIRECTORY] Result: ${toolResult.slice(0, 500)}...`);
-        
-        // Track execution for response
-        toolExecutions.push({ 
-          function: fnName, 
-          args, 
-          result: toolResult 
-        });
-      }
-      else if (fnName === 'execute_command') {
-        const command = args.command;
-        const workingDir = args.working_directory || '/app';
-        
-        // execute the tool (run command in pod)
-        toolResult = await executeCommandInPod(podName, namespace, command, workingDir);
-        console.log(`[EXECUTE_COMMAND] Command: ${command}, Working Dir: ${workingDir}`);
-        console.log(`[EXECUTE_COMMAND] Result: ${toolResult.slice(0, 500)}...`);
-        
-        // Track execution for response
-        toolExecutions.push({ 
-          function: fnName, 
-          args, 
-          result: toolResult 
-        });
-      }
-      else if (fnName === 'search_code') {
-        const query = args.query;
-        const searchPath = args.path || '/app';
-        
-        // execute the tool (search code in pod)
-        toolResult = await searchCodeInPod(podName, namespace, query, searchPath);
-        console.log(`[SEARCH_CODE] Query: ${query}, Path: ${searchPath}`);
-        console.log(`[SEARCH_CODE] Result: ${toolResult.slice(0, 500)}...`);
-        
-        // Track execution for response
-        toolExecutions.push({ 
-          function: fnName, 
-          args, 
-          result: toolResult 
-        });
-      }
-      else if (fnName === 'delete_file') {
-        const filePath = args.path;
-        
-        // execute the tool (delete file from pod)
-        toolResult = await deleteFileInPod(podName, namespace, filePath);
-        console.log(`[DELETE_FILE] Path: ${filePath}`);
-        console.log(`[DELETE_FILE] Result: ${toolResult}`);
-        
-        // Track execution for response
-        toolExecutions.push({ 
-          function: fnName, 
-          args, 
-          result: toolResult 
-        });
-      }
-      else {
-        return res.status(400).json({ error: "Unknown tool requested" });
-      }
+        let args = {};
+        try { 
+          args = JSON.parse(rawArgs); 
+        } catch (e) {
+          args = { path: rawArgs }; // fallback if model returned plain string
+        }
 
-      // Add the tool result into the messages with role "tool"
-      messages.push({
-        role: "tool",
-        tool_call_id: toolCall.id,  // Required for tool responses
-        content: toolResult
-      });
+        let toolResult;
+        
+        if (fnName === "read_file") {
+          const filePath = args.path;
+          console.log(`[AGENT] Executing: ${fnName}(${filePath})`);
+          // execute the tool (read file from pod)
+          toolResult = await readFileFromPod(podName, namespace, filePath);
+          
+          // Track execution for response
+          toolExecutions.push({ 
+            function: fnName, 
+            args, 
+            filePreview: toolResult.slice(0, 1000) 
+          });
+        } 
+        else if (fnName === 'write_file') {
+          const filePath = args.path;
+          const fileContent = args.content;
+          console.log(`[AGENT] Executing: ${fnName}(${filePath})`);
+          // execute the tool (write file to pod)
+          toolResult = await writeFileInPod(podName, namespace, filePath, fileContent);
+          
+          // Track execution for response
+          toolExecutions.push({ 
+            function: fnName, 
+            args, 
+            result: toolResult 
+          });
+        }
+        else if (fnName === 'list_directory') {
+          const dirPath = args.path || '/app';
+          console.log(`[AGENT] Executing: ${fnName}(${dirPath})`);
+          // execute the tool (list directory in pod)
+          toolResult = await listDirectoryInPod(podName, namespace, dirPath);
+          
+          // Track execution for response
+          toolExecutions.push({ 
+            function: fnName, 
+            args, 
+            result: toolResult 
+          });
+        }
+        else if (fnName === 'execute_command') {
+          const command = args.command;
+          const workingDir = args.working_directory || '/app';
+          console.log(`[AGENT] Executing: ${fnName}(${command})`);
+          // execute the tool (run command in pod)
+          toolResult = await executeCommandInPod(podName, namespace, command, workingDir);
+          
+          // Track execution for response
+          toolExecutions.push({ 
+            function: fnName, 
+            args, 
+            result: toolResult 
+          });
+        }
+        else if (fnName === 'search_code') {
+          const query = args.query;
+          const searchPath = args.path || '/app';
+          console.log(`[AGENT] Executing: ${fnName}(${query})`);
+          // execute the tool (search code in pod)
+          toolResult = await searchCodeInPod(podName, namespace, query, searchPath);
+          
+          // Track execution for response
+          toolExecutions.push({ 
+            function: fnName, 
+            args, 
+            result: toolResult 
+          });
+        }
+        else if (fnName === 'delete_file') {
+          const filePath = args.path;
+          console.log(`[AGENT] Executing: ${fnName}(${filePath})`);
+          // execute the tool (delete file from pod)
+          toolResult = await deleteFileInPod(podName, namespace, filePath);
+          
+          // Track execution for response
+          toolExecutions.push({ 
+            function: fnName, 
+            args, 
+            result: toolResult 
+          });
+        }
+        else {
+          return res.status(400).json({ error: "Unknown tool requested" });
+        }
+
+        // Add the tool result into the messages with role "tool"
+        messages.push({
+          role: "tool",
+          tool_call_id: toolCall.id,  // Required for tool responses
+          content: toolResult
+        });
+      }
 
       // Call the model again with the tool output so it can continue reasoning
       currentResponse = await openai.chat.completions.create({
@@ -510,6 +523,8 @@ app.post("/agent", async (req, res) => {
     }
 
     // No more tool calls - return final assistant response
+    console.log(`[AGENT] Completed: ${iterationCount} iteration(s), ${toolExecutions.length} tool execution(s)`);
+    
     return res.json({
       modelResponse: currentMessage,
       toolExecution: toolExecutions.length === 1 
@@ -517,7 +532,7 @@ app.post("/agent", async (req, res) => {
         : toolExecutions // Return array if multiple executions
     });
   } catch (err) {
-    console.error(err);
+    console.error(`[AGENT] ERROR: ${err.message}`);
     return res.status(500).json({ error: err.message });
   }
 });

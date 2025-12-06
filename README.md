@@ -17,6 +17,90 @@ This project implements an agent loop where an LLM (GPT-4) can:
 4. **Tool executes** - reads file from pod using `kubectl exec`
 5. **LLM processes** the file content and provides a final response
 
+## Message Flow Diagram
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ INITIAL STATE                                                │
+│ messages = [system, user]                                    │
+└─────────────────────────────────────────────────────────────┘
+                    ↓
+┌─────────────────────────────────────────────────────────────┐
+│ FIRST API CALL                                               │
+│ openai.chat.completions.create({ messages, tools })         │
+└─────────────────────────────────────────────────────────────┘
+                    ↓
+        ┌───────────────────────┐
+        │ Has tool_calls?        │
+        └───────────────────────┘
+                ↓ YES                    ↓ NO
+    ┌───────────────────────┐    ┌───────────────────────┐
+    │ ENTER WHILE LOOP      │    │ EXIT - Return Final   │
+    │                       │    │ Response              │
+    └───────────────────────┘    └───────────────────────┘
+                ↓
+    ┌───────────────────────────────────────────┐
+    │ ITERATION START                           │
+    │ 1. Check MAX_ITERATIONS                   │
+    │ 2. Push assistant message to messages[]   │
+    │    messages.push(currentMessage)          │
+    │    [system, user, assistant_with_tools]   │
+    └───────────────────────────────────────────┘
+                ↓
+    ┌───────────────────────────────────────────┐
+    │ ENTER FOR LOOP                            │
+    │ Process EACH tool_call                    │
+    └───────────────────────────────────────────┘
+                ↓
+    ┌───────────────────────────────────────────┐
+    │ FOR EACH toolCall:                        │
+    │                                           │
+    │ 1. Parse fnName & args                    │
+    │ 2. Execute tool                           │
+    │    - readFileFromPod()                    │
+    │    - writeFileInPod()                     │
+    │    - executeCommandInPod()                │
+    │    - etc.                                 │
+    │ 3. Push tool result to messages[]         │
+    │    messages.push({                        │
+    │      role: "tool",                        │
+    │      tool_call_id: toolCall.id,           │
+    │      content: toolResult                  │
+    │    })                                     │
+    │    [..., assistant, tool_result_1,        │
+    │              tool_result_2, ...]          │
+    └───────────────────────────────────────────┘
+                ↓
+    ┌───────────────────────────────────────────┐
+    │ FOR LOOP COMPLETE                         │
+    │ All tool calls processed                  │
+    │ All tool results added to messages[]      │
+    └───────────────────────────────────────────┘
+                ↓
+    ┌───────────────────────────────────────────┐
+    │ CALL OPENAI AGAIN                         │
+    │ openai.chat.completions.create({          │
+    │   messages,  // Now includes tool results │
+    │   tools                                    │
+    │ })                                        │
+    └───────────────────────────────────────────┘
+                ↓
+    ┌───────────────────────────────────────────┐
+    │ UPDATE currentMessage                     │
+    │ currentMessage = response.choices[0].message│
+    └───────────────────────────────────────────┘
+                ↓
+        ┌───────────────────────┐
+        │ Check while condition  │
+        │ Has tool_calls?        │
+        └───────────────────────┘
+                ↓ YES                    ↓ NO
+        ┌───────────────────────┐        ┌───────────────────────┐
+        │ LOOP BACK             │        │ EXIT WHILE LOOP       │
+        │                       │        │ Return Final Response │
+        └───────────────────────┘        └───────────────────────┘
+```
+
 ## Prerequisites
 
 - Node.js (v14+)
