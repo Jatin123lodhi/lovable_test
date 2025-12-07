@@ -490,64 +490,62 @@ app.post("/agent", async (req, res) => {
         break;
       }
       console.log(`[LLM] Iteration ${iterationCount}: Processing tool call`);
-      const toolCall = currentMessage.tool_calls[0]; // Get first tool call
-      
-      // Check if toolCall exists
-      if (!toolCall) {
-        break; // Exit loop if no tool call found
-      }
-      
-      // Type guard: check if it's a function tool call (not custom)
-      if (toolCall.type !== 'function') {
-        return res.status(400).json({ error: "Only function tool calls are supported" });
-      }
-      
-      const fnName = toolCall.function.name;
-      const rawArgs = toolCall.function.arguments || "{}";
-      
-      let args: any = {};
-      try { 
-        args = JSON.parse(rawArgs); 
-      } catch (e) {
-        args = { path: rawArgs }; // fallback if model returned plain string
-      }
 
-      // Add the assistant's tool call message to history
       messages.push(currentMessage);
-
-      let toolResult;
       
-      
-      
-      if (fnName === "start_base_image") {
-        const baseImage = args.base_image;
-        const deploymentName = args.name;
-        
-        // Validate base_image exists in baseImageMap
-        if (!baseImageMap[baseImage]) {
-          toolResult = `__ERROR__: Invalid base image "${baseImage}". Available options: ${Object.keys(baseImageMap).join(", ")}`;
-        } else {
-          // Call helper function to start deployment and service, get pod name, uniqueId, and domain
-          const result = await startBaseImageDeployment(baseImage, deploymentName, namespace);
-          podName = result.podName;
-          
-          toolResult = `Base image deployment started successfully. Pod name: ${result.podName}. Access your app at: ${result.domain}`;
-          
-          // Track execution for response
-          toolExecutions.push({ 
-            function: fnName, 
-            args, 
-            podName: result.podName,
-            uniqueId: result.uniqueId,
-            domain: result.domain
-          });
+      // Process all tool calls in parallel (or sequentially if dependencies exist)
+      for (let toolCall of currentMessage.tool_calls) {
+        // Check if toolCall exists
+        if (!toolCall) {
+          continue; // Skip invalid tool calls
         }
-      }
-      else if (!podName) {
-        toolResult = "__ERROR__: No pod available. Please start a base image deployment first using the 'start_base_image' tool.";
-      } 
-      else if (fnName === "read_file") {
-        const filePath = args.path;
+        
+        // Type guard: check if it's a function tool call (not custom)
+        if (toolCall.type !== 'function') {
+          return res.status(400).json({ error: "Only function tool calls are supported" });
+        }
+        
+        const fnName = toolCall.function.name;
+        const rawArgs = toolCall.function.arguments || "{}";
+        
+        let args: any = {};
+        try { 
+          args = JSON.parse(rawArgs); 
+        } catch (e) {
+          args = { path: rawArgs }; // fallback if model returned plain string
+        }
+
+        let toolResult;
+        
+        if (fnName === "start_base_image") {
+          const baseImage = args.base_image;
+          const deploymentName = args.name;
+          
+          // Validate base_image exists in baseImageMap
+          if (!baseImageMap[baseImage]) {
+            toolResult = `__ERROR__: Invalid base image "${baseImage}". Available options: ${Object.keys(baseImageMap).join(", ")}`;
+          } else {
+            // Call helper function to start deployment and service, get pod name, uniqueId, and domain
+            const result = await startBaseImageDeployment(baseImage, deploymentName, namespace);
+            podName = result.podName;
+            
+            toolResult = `Base image deployment started successfully. Pod name: ${result.podName}. Access your app at: ${result.domain}`;
+            
+            // Track execution for response
+            toolExecutions.push({ 
+              function: fnName, 
+              args, 
+              podName: result.podName,
+              uniqueId: result.uniqueId,
+              domain: result.domain
+            });
+          }
+        }
+        else if (!podName) {
+          toolResult = "__ERROR__: No pod available. Please start a base image deployment first using the 'start_base_image' tool.";
+        } 
+        else if (fnName === "read_file") {
+          const filePath = args.path;
           // execute the tool (read file from pod)
           toolResult = await readFileFromPod(podName, namespace, filePath);
           
@@ -557,97 +555,98 @@ app.post("/agent", async (req, res) => {
             args, 
             filePreview: toolResult.slice(0, 1000) 
           });
-      } 
-      else if (fnName === 'write_file') {
-        const filePath = args.path;
-        const fileContent = args.content;
-        
-        // execute the tool (write file to pod)
-        toolResult = await writeFileInPod(podName, namespace, filePath, fileContent);
-        console.log(`[WRITE_FILE] Result: ${toolResult}`);
-        
-        // Track execution for response
-        toolExecutions.push({ 
-          function: fnName, 
-          args, 
-          result: toolResult 
+        } 
+        else if (fnName === 'write_file') {
+          const filePath = args.path;
+          const fileContent = args.content;
+          
+          // execute the tool (write file to pod)
+          toolResult = await writeFileInPod(podName, namespace, filePath, fileContent);
+          console.log(`[WRITE_FILE] Result: ${toolResult}`);
+          
+          // Track execution for response
+          toolExecutions.push({ 
+            function: fnName, 
+            args, 
+            result: toolResult 
+          });
+        }
+        else if (fnName === 'list_directory') {
+          const dirPath = args.path || '/app';
+          
+          // execute the tool (list directory in pod)
+          toolResult = await listDirectoryInPod(podName, namespace, dirPath);
+          console.log(`[LIST_DIRECTORY] Path: ${dirPath}`);
+          console.log(`[LIST_DIRECTORY] Result: ${toolResult.slice(0, 500)}...`);
+          
+          // Track execution for response
+          toolExecutions.push({ 
+            function: fnName, 
+            args, 
+            result: toolResult 
+          });
+        }
+        else if (fnName === 'execute_command') {
+          const command = args.command;
+          const workingDir = args.working_directory || '/app';
+          
+          // execute the tool (run command in pod)
+          toolResult = await executeCommandInPod(podName, namespace, command, workingDir);
+          console.log(`[EXECUTE_COMMAND] Command: ${command}, Working Dir: ${workingDir}`);
+          console.log(`[EXECUTE_COMMAND] Result: ${toolResult.slice(0, 500)}...`);
+          
+          // Track execution for response
+          toolExecutions.push({ 
+            function: fnName, 
+            args, 
+            result: toolResult 
+          });
+        }
+        else if (fnName === 'search_code') {
+          const query = args.query;
+          const searchPath = args.path || '/app';
+          
+          // execute the tool (search code in pod)
+          toolResult = await searchCodeInPod(podName, namespace, query, searchPath);
+          console.log(`[SEARCH_CODE] Query: ${query}, Path: ${searchPath}`);
+          console.log(`[SEARCH_CODE] Result: ${toolResult.slice(0, 500)}...`);
+          
+          // Track execution for response
+          toolExecutions.push({ 
+            function: fnName, 
+            args, 
+            result: toolResult 
+          });
+        }
+        else if (fnName === 'delete_file') {
+          const filePath = args.path;
+          
+          // execute the tool (delete file from pod)
+          toolResult = await deleteFileInPod(podName, namespace, filePath);
+          console.log(`[DELETE_FILE] Path: ${filePath}`);
+          console.log(`[DELETE_FILE] Result: ${toolResult}`);
+          
+          // Track execution for response
+          toolExecutions.push({ 
+            function: fnName, 
+            args, 
+            result: toolResult 
+          });
+        }
+        else {
+          return res.status(400).json({ error: "Unknown tool requested" });
+        }
+
+        // Add the tool result into the messages with role "tool"
+        messages.push({
+          role: "tool",
+          tool_call_id: toolCall.id,  // Required for tool responses
+          content: toolResult
         });
-      }
-      else if (fnName === 'list_directory') {
-        const dirPath = args.path || '/app';
-        
-        // execute the tool (list directory in pod)
-        toolResult = await listDirectoryInPod(podName, namespace, dirPath);
-        console.log(`[LIST_DIRECTORY] Path: ${dirPath}`);
-        console.log(`[LIST_DIRECTORY] Result: ${toolResult.slice(0, 500)}...`);
-        
-        // Track execution for response
-        toolExecutions.push({ 
-          function: fnName, 
-          args, 
-          result: toolResult 
-        });
-      }
-      else if (fnName === 'execute_command') {
-        const command = args.command;
-        const workingDir = args.working_directory || '/app';
-        
-        // execute the tool (run command in pod)
-        toolResult = await executeCommandInPod(podName, namespace, command, workingDir);
-        console.log(`[EXECUTE_COMMAND] Command: ${command}, Working Dir: ${workingDir}`);
-        console.log(`[EXECUTE_COMMAND] Result: ${toolResult.slice(0, 500)}...`);
-        
-        // Track execution for response
-        toolExecutions.push({ 
-          function: fnName, 
-          args, 
-          result: toolResult 
-        });
-      }
-      else if (fnName === 'search_code') {
-        const query = args.query;
-        const searchPath = args.path || '/app';
-        
-        // execute the tool (search code in pod)
-        toolResult = await searchCodeInPod(podName, namespace, query, searchPath);
-        console.log(`[SEARCH_CODE] Query: ${query}, Path: ${searchPath}`);
-        console.log(`[SEARCH_CODE] Result: ${toolResult.slice(0, 500)}...`);
-        
-        // Track execution for response
-        toolExecutions.push({ 
-          function: fnName, 
-          args, 
-          result: toolResult 
-        });
-      }
-      else if (fnName === 'delete_file') {
-        const filePath = args.path;
-        
-        // execute the tool (delete file from pod)
-        toolResult = await deleteFileInPod(podName, namespace, filePath);
-        console.log(`[DELETE_FILE] Path: ${filePath}`);
-        console.log(`[DELETE_FILE] Result: ${toolResult}`);
-        
-        // Track execution for response
-        toolExecutions.push({ 
-          function: fnName, 
-          args, 
-          result: toolResult 
-        });
-      }
-      else {
-        return res.status(400).json({ error: "Unknown tool requested" });
       }
 
-      // Add the tool result into the messages with role "tool"
-      messages.push({
-        role: "tool",
-        tool_call_id: toolCall.id,  // Required for tool responses
-        content: toolResult
-      });
-
-      // Call the model again with the tool output so it can continue reasoning
-      console.log(`[LLM] Calling API again with ${messages.length} messages (tool result length: ${toolResult.length})`);
+      // Call the model again with all tool outputs so it can continue reasoning
+      console.log(`[LLM] Calling API again with ${messages.length} messages (processed ${currentMessage.tool_calls.length} tool calls)`);
       try {
         currentResponse = await openai.chat.completions.create({
           model: MODEL,
