@@ -12,7 +12,6 @@ spec:
       labels:
         app: react-app
     spec:
-      containers:
+        containers:
         - name: react-app
           image: cryptocal/react_base_img:latest
-          command: ["npm", "run", "dev", "--", "--host", "0.0.0.0"]

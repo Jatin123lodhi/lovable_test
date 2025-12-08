@@ -3,7 +3,6 @@ import express from "express";
 import dotenv from "dotenv";
 import { exec as cpExec } from "child_process";
 import util from "util";
-import fs from "fs-extra";
 import OpenAI from "openai";
 
 dotenv.config();
@@ -536,6 +535,306 @@ app.post("/agent", async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 });
+
+function sendSSE(res, type, data){
+  res.write(`data: ${JSON.stringify({ type, data })}\n\n`);
+}
+
+
+
+app.post("/stream-agent", async (req, res) => {
+  console.log(`[STREAM-AGENT] New request received at ${new Date().toISOString()}`);
+  console.log(`[STREAM-AGENT] Request body:`, JSON.stringify(req.body));
+  
+  // Set headers immediately
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('Access-Control-Allow-Origin', '*'); // Allow CORS for testing
+
+  try {
+    sendSSE(res, 'status', { message: 'Starting agent...' });
+
+    const userPrompt = req.body.prompt || "Please inspect the repo and ask for any file you need.";
+    const namespace = process.env.NAMESPACE || "default";
+    const labelSelector = process.env.LABEL_SELECTOR || "app=react-app";
+
+    let podName = null;
+    let folderMetadata = "";
+
+    // Dynamically get pod name using label selector
+    try {
+      console.log(`[STREAM-AGENT] Attempting to get pod name...`);
+      podName = await getPodName(namespace, labelSelector);
+      console.log(`[STREAM-AGENT] Pod found: ${podName}`);
+      sendSSE(res, 'pod_found', { podName });
+
+      // Get actual folder metadata from the pod
+      console.log(`[STREAM-AGENT] Getting folder metadata...`);
+      const folderMetadataRaw = await getFolderMetadata(podName, namespace);
+      folderMetadata = `Project tree:\n${folderMetadataRaw}`;
+    } catch (err) {
+      console.error(`[STREAM-AGENT] ERROR: Failed to find pod: ${err.message}`);
+      sendSSE(res, 'warning', { message: `Failed to find pod: ${err.message}. Continuing without pod access.` });
+      folderMetadata = "Note: Pod access unavailable. You can still provide instructions.";
+    }
+
+    // initial message history
+    const messages = [
+      { role: "system", content: "You are an expert code assistant. Use tools if you need to read files, write files, execute commands, or search the codebase." },
+      { role: "user", content: `${userPrompt}\n\n${folderMetadata}\nIf you need to read a file, call the 'read_file' tool. If you need to write or update a file, call the 'write_file' tool with { "path": "/app/your-file.js", "content": "file content here" }. If you need to install packages, run scripts, or execute any shell command, use the 'execute_command' tool with { "command": "your-command-here", "working_directory": "/app" }. If you need to find where code is used or search for patterns, use the 'search_code' tool with { "query": "search-term", "path": "/app" }.` }
+    ];
+
+    const MAX_ITERATIONS = 20;
+    let iterationCount = 0;
+    const toolExecutions = []; // Track all tool executions
+    // Start the agent loop
+    let hasMoreToolCalls = true;
+    
+    while (hasMoreToolCalls) {
+      iterationCount++;
+      
+      if (iterationCount > MAX_ITERATIONS) {
+        console.error(`[STREAM-AGENT] ERROR: Max iterations (${MAX_ITERATIONS}) reached!`);
+        sendSSE(res, 'error', { message: `Max iterations (${MAX_ITERATIONS}) reached` });
+        res.end();
+        return;
+      }
+
+      console.log(`[STREAM-AGENT] Iteration ${iterationCount} - Calling model...`);
+
+      // Call the model with streaming
+      let currentResponse = await openai.chat.completions.create({
+        model: MODEL,
+        messages,
+        tools,
+        tool_choice: "auto",
+        stream: true
+      });
+
+      // Initialize message accumulator for this iteration
+      let currentMessage = { role: "assistant", content: "", tool_calls: [] };
+
+      // Process streaming chunks
+      for await (const chunk of currentResponse) {
+        const delta = chunk.choices[0]?.delta;
+        if (!delta) continue;
+        
+        // Accumulate content if present
+        if (delta.content) {
+          currentMessage.content += delta.content;
+          sendSSE(res, 'model_chunk', { content: delta.content });
+        }
+
+        // Accumulate tool calls
+        if (delta.tool_calls) {
+          for (const toolCallDelta of delta.tool_calls) {
+            const i = toolCallDelta.index;
+        
+            // Ensure array slot exists
+            if (!currentMessage.tool_calls[i]) {
+              currentMessage.tool_calls[i] = {
+                id: "",
+                type: "function",
+                function: { name: "", arguments: "" }
+              };
+            }
+        
+            const call = currentMessage.tool_calls[i];
+        
+            // ID (usually arrives once)
+            if (toolCallDelta.id) {
+              call.id = toolCallDelta.id;
+            }
+        
+            // Function name (may stream in parts)
+            if (toolCallDelta.function?.name) {
+              call.function.name += toolCallDelta.function.name;
+            }
+        
+            // Function arguments (always streams in many chunks)
+            if (toolCallDelta.function?.arguments) {
+              call.function.arguments += toolCallDelta.function.arguments;
+            }
+          }
+        }
+      }
+
+      // Check if we have tool calls to process
+      if (currentMessage.tool_calls && currentMessage.tool_calls.length > 0) {
+        console.log(`[STREAM-AGENT] Iteration ${iterationCount} - Processing ${currentMessage.tool_calls.length} tool call(s)`);
+        
+        // Add the assistant's tool call message to history
+        messages.push(currentMessage);
+        
+        sendSSE(res, 'tool_calls', { 
+          count: currentMessage.tool_calls.length,
+          calls: currentMessage.tool_calls.map(tc => ({ 
+            id: tc.id, 
+            name: tc.function.name 
+          }))
+        });
+
+        // Process each tool call
+        for (const toolCall of currentMessage.tool_calls) {
+          const fnName = toolCall.function.name;
+          const rawArgs = toolCall.function.arguments || "{}";
+          
+          let args = {};
+          try {
+            args = JSON.parse(rawArgs);
+          } catch (e) {
+            args = { path: rawArgs }; // fallback if model returned plain string
+          }
+
+          sendSSE(res, 'tool_start', { function: fnName, args });
+
+          let toolResult;
+          
+          if (fnName === "read_file") {
+            const filePath = args.path;
+            console.log(`[STREAM-AGENT] Executing: ${fnName}(${filePath})`);
+            if (!podName) {
+              toolResult = `__ERROR_READING_FILE__: Pod access not available.`;
+            } else {
+              toolResult = await readFileFromPod(podName, namespace, filePath);
+            }
+            
+            toolExecutions.push({ 
+              function: fnName, 
+              args, 
+              filePreview: toolResult.slice(0, 1000) 
+            });
+          } 
+          else if (fnName === 'write_file') {
+            const filePath = args.path;
+            const fileContent = args.content;
+            console.log(`[STREAM-AGENT] Executing: ${fnName}(${filePath})`);
+            if (!podName) {
+              toolResult = `__ERROR_WRITING_FILE__: Pod access not available.`;
+            } else {
+              toolResult = await writeFileInPod(podName, namespace, filePath, fileContent);
+            }
+            
+            toolExecutions.push({ 
+              function: fnName, 
+              args, 
+              result: toolResult 
+            });
+          }
+          else if (fnName === 'list_directory') {
+            const dirPath = args.path || '/app';
+            console.log(`[STREAM-AGENT] Executing: ${fnName}(${dirPath})`);
+            if (!podName) {
+              toolResult = `__ERROR_LISTING_DIRECTORY__: Pod access not available.`;
+            } else {
+              toolResult = await listDirectoryInPod(podName, namespace, dirPath);
+            }
+            
+            toolExecutions.push({ 
+              function: fnName, 
+              args, 
+              result: toolResult 
+            });
+          }
+          else if (fnName === 'execute_command') {
+            const command = args.command;
+            const workingDir = args.working_directory || '/app';
+            console.log(`[STREAM-AGENT] Executing: ${fnName}(${command})`);
+            if (!podName) {
+              toolResult = `__ERROR_EXECUTING_COMMAND__: Pod access not available.`;
+            } else {
+              toolResult = await executeCommandInPod(podName, namespace, command, workingDir);
+            }
+            
+            toolExecutions.push({ 
+              function: fnName, 
+              args, 
+              result: toolResult 
+            });
+          }
+          else if (fnName === 'search_code') {
+            const query = args.query;
+            const searchPath = args.path || '/app';
+            console.log(`[STREAM-AGENT] Executing: ${fnName}(${query})`);
+            if (!podName) {
+              toolResult = `__ERROR_SEARCHING_CODE__: Pod access not available.`;
+            } else {
+              toolResult = await searchCodeInPod(podName, namespace, query, searchPath);
+            }
+            
+            toolExecutions.push({ 
+              function: fnName, 
+              args, 
+              result: toolResult 
+            });
+          }
+          else if (fnName === 'delete_file') {
+            const filePath = args.path;
+            console.log(`[STREAM-AGENT] Executing: ${fnName}(${filePath})`);
+            if (!podName) {
+              toolResult = `__ERROR_DELETING_FILE__: Pod access not available.`;
+            } else {
+              toolResult = await deleteFileInPod(podName, namespace, filePath);
+            }
+            
+            toolExecutions.push({ 
+              function: fnName, 
+              args, 
+              result: toolResult 
+            });
+          }
+          else {
+            sendSSE(res, 'error', { message: `Unknown tool requested: ${fnName}` });
+            res.end();
+            return;
+          }
+
+          // Add the tool result into the messages with role "tool"
+          messages.push({
+            role: "tool",
+            tool_call_id: toolCall.id,
+            content: toolResult
+          });
+
+          sendSSE(res, 'tool_result', { 
+            function: fnName, 
+            result: toolResult.slice(0, 500) // Preview of result
+          });
+        }
+      } else {
+        // No more tool calls - this is the final response
+        console.log(`[STREAM-AGENT] Completed: ${iterationCount} iteration(s), ${toolExecutions.length} tool execution(s)`);
+        
+        // Add final message to history (always add, even if empty, for consistency)
+        messages.push(currentMessage);
+        
+        sendSSE(res, 'complete', { 
+          message: 'Agent completed',
+          iterations: iterationCount,
+          toolExecutions: toolExecutions.length,
+          finalResponse: currentMessage.content || "No response content"
+        });
+        
+        hasMoreToolCalls = false;
+      }
+    }
+
+    res.end();
+  } catch (err) {
+    console.error(`[STREAM-AGENT] ERROR: ${err.message}`);
+    console.error(`[STREAM-AGENT] Stack:`, err.stack);
+    try {
+      sendSSE(res, 'error', { message: err.message });
+      res.end();
+    } catch (sendError) {
+      // Response might already be closed
+      console.error(`[STREAM-AGENT] Failed to send error: ${sendError.message}`);
+      res.end();
+    }
+  }
+})
+
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on ${PORT}`));
