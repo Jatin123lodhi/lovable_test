@@ -38,7 +38,7 @@ async function sendToLLM(prompt: string){
 }
 
 const baseImageMap: Record<string, string> = {
-  "react": "cryptocal/react_base_img:latest",
+  "react": "cryptocal/react_base_img:v1.0.0",
   "react-native": "cryptocal/react-native_base_img:latest",
   "flutter": "cryptocal/flutter_base_img:latest",
   "vue": "cryptocal/vue_base_img:latest",
@@ -388,13 +388,20 @@ async function startBaseImageDeployment(
   const uniqueId = deploymentName || randomUUID();
   const finalDeploymentName = uniqueId; // Use UUID directly as deployment name
 
+  // Build the public domain for HMR configuration
+  const domain = `${uniqueId}.lovableaiweb.info`;
+
   // 3. Create deployment and service using createDeploymentAndServiceForBaseImage
   console.log(`Creating deployment "${finalDeploymentName}" with image "${image}" in namespace "${namespace}"`);
   const deploymentAndService = await createDeploymentAndServiceForBaseImage(
     finalDeploymentName,
     image,
     1,
-    namespace
+    namespace,
+    [
+      { name: "VITE_HMR_HOST", value: domain },
+      { name: "VITE_HMR_PORT", value: "80" },
+    ]
   );
 
   console.log(`Deployment created: ${deploymentAndService.deployment}`);
@@ -421,7 +428,6 @@ async function startBaseImageDeployment(
     console.log(`Pod name: ${podName}`);
     
     // 6. Return pod name, unique ID, and domain URL
-    const domain = `${uniqueId}.lovableaiweb.info`;
     return { podName, uniqueId, domain };
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);
@@ -441,30 +447,28 @@ app.post("/agent", async (req, res) => {
   const namespace = process.env.NAMESPACE || "default";
   const labelSelector = process.env.LABEL_SELECTOR || "app=react-app";
 
-  // Track the current pod name (will be set when start_base_image is called)
-  let podName: string | undefined;
+  // Track the current pod name (can be provided in request or set when start_base_image is called)
+  let podName: string | undefined = req.body.podName;
 
-  // Dynamically get pod name using label selector
-  // let podName;
-  // try {
-  //   podName = await getPodName(namespace, labelSelector);
-  // } catch (err) {
-  //   return res.status(400).json({ error: `Failed to find pod: ${err.message}` });
-  // }
-
-  // // Get actual folder metadata from the pod
-  // const folderMetadataRaw = await getFolderMetadata(podName, namespace);
-  // const folderMetadata = `Project tree:\n${folderMetadataRaw}`;
+  // Build initial message based on whether podName is provided
+  let systemMessage = "You are a helpful assistant that can interact with Kubernetes pods and manage deployments. IMPORTANT: When starting a new base image deployment, always first use 'list_directory' to check the directory structure and see what files exist before trying to read them. React base images typically use TypeScript (.tsx files), not JavaScript (.js). After starting a deployment, wait a moment and check the directory structure to understand the project layout.";
+  
+  let userMessage = userPrompt;
+  
+  if (podName) {
+    // Pod already provided - skip base image creation step
+    console.log(`[LLM] Using provided pod: ${podName}`);
+    userMessage += `\n\nNOTE: A pod is already available (${podName}). You can directly use the following tools without calling 'start_base_image':\n- read_file: Read files from the pod\n- write_file: Write or update files\n- list_directory: List directory contents\n- execute_command: Run shell commands\n- search_code: Search for code patterns\n- delete_file: Delete files\n\nIMPORTANT WORKFLOW:\n1. First use 'list_directory' with { "path": "/app" } to see the project structure\n2. Then use 'list_directory' with { "path": "/app/src" } to see source files\n3. React apps typically use .tsx or .ts files, not .js files\n4. Once you know the file structure, use 'read_file' to read files\n5. Use 'write_file' to create or update files\n6. Use 'execute_command' to run commands like 'npm install' or 'npm run dev'\n7. Use 'search_code' to find code patterns\n\nIf a file doesn't exist when you try to read it, check the directory structure first to find the correct path and file extension.`;
+  } else {
+    // No pod provided - need to start base image first
+    userMessage += `\n\nAvailable base images: ${Object.keys(baseImageMap).join(", ")}. If you need to start a base image deployment, call the 'start_base_image' tool with { "base_image": "react" } (or vue, angular, nextjs, nuxtjs, flutter, react-native, svelte).\n\nIMPORTANT WORKFLOW:\n1. After starting a base image, first use 'list_directory' with { "path": "/app" } to see the project structure\n2. Then use 'list_directory' with { "path": "/app/src" } to see source files\n3. React apps typically use .tsx or .ts files, not .js files\n4. Once you know the file structure, use 'read_file' to read files\n5. Use 'write_file' to create or update files\n6. Use 'execute_command' to run commands like 'npm install' or 'npm run dev'\n7. Use 'search_code' to find code patterns\n\nIf a file doesn't exist when you try to read it, check the directory structure first to find the correct path and file extension.`;
+  }
 
   // initial message history
   const messages: ChatCompletionMessageParam[] = [
-    { role: "system", content: "You are a helpful assistant that can interact with Kubernetes pods and manage deployments. IMPORTANT: When starting a new base image deployment, always first use 'list_directory' to check the directory structure and see what files exist before trying to read them. React base images typically use TypeScript (.tsx files), not JavaScript (.js). After starting a deployment, wait a moment and check the directory structure to understand the project layout." },
-    { role: "user", content: `${userPrompt}\n\nAvailable base images: ${Object.keys(baseImageMap).join(", ")}. If you need to start a base image deployment, call the 'start_base_image' tool with { "base_image": "react" } (or vue, angular, nextjs, nuxtjs, flutter, react-native, svelte).\n\nIMPORTANT WORKFLOW:\n1. After starting a base image, first use 'list_directory' with { "path": "/app" } to see the project structure\n2. Then use 'list_directory' with { "path": "/app/src" } to see source files\n3. React apps typically use .tsx or .ts files, not .js files\n4. Once you know the file structure, use 'read_file' to read files\n5. Use 'write_file' to create or update files\n6. Use 'execute_command' to run commands like 'npm install' or 'npm run dev'\n7. Use 'search_code' to find code patterns\n\nIf a file doesn't exist when you try to read it, check the directory structure first to find the correct path and file extension.` }
+    { role: "system", content: systemMessage },
+    { role: "user", content: userMessage }
   ];
-  // const messages: ChatCompletionMessageParam[] = [
-  //   { role: "system", content: "You are a helpful assistant that can start base image deployments." },
-  //   { role: "user", content: `${userPrompt}\n\nAvailable base images: ${Object.keys(baseImageMap).join(", ")}. Call the 'start_base_image' tool with { "base_image": "react" } to start a deployment.` }
-  // ];
 
   try {
     // 1) Ask the model (tools included in request)
@@ -688,6 +692,534 @@ app.post("/agent", async (req, res) => {
   }
 });
 
+// Helper function to send Server-Sent Events
+function sendSSE(res: express.Response, type: string, data: any) {
+  res.write(`data: ${JSON.stringify({ type, data })}\n\n`);
+}
+
+app.post("/stream-agent", async (req, res) => {
+  console.log(`[STREAM-AGENT] New request received at ${new Date().toISOString()}`);
+  
+  // Set headers immediately for SSE
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('Access-Control-Allow-Origin', '*'); // Allow CORS for testing
+
+  const userPrompt = req.body.prompt || "Please inspect the repo and ask for any file you need.";
+  const namespace = process.env.NAMESPACE || "default";
+  const labelSelector = process.env.LABEL_SELECTOR || "app=react-app";
+
+  // Track the current pod name (can be provided in request or set when start_base_image is called)
+  let podName: string | undefined = req.body.podName;
+
+  try {
+    sendSSE(res, 'status', { message: 'Starting agent...' });
+
+    // Build initial message based on whether podName is provided
+    let systemMessage = "You are a helpful assistant that can interact with Kubernetes pods and manage deployments. IMPORTANT: When starting a new base image deployment, always first use 'list_directory' to check the directory structure and see what files exist before trying to read them. React base images typically use TypeScript (.tsx files), not JavaScript (.js). After starting a deployment, wait a moment and check the directory structure to understand the project layout.";
+    
+    let userMessage = userPrompt;
+    
+    if (podName) {
+      // Pod already provided - skip base image creation step
+      console.log(`[STREAM-AGENT] Using provided pod: ${podName}`);
+      sendSSE(res, 'pod_found', { podName, source: 'provided' });
+      userMessage += `\n\nNOTE: A pod is already available (${podName}). You can directly use the following tools without calling 'start_base_image':\n- read_file: Read files from the pod\n- write_file: Write or update files\n- list_directory: List directory contents\n- execute_command: Run shell commands\n- search_code: Search for code patterns\n- delete_file: Delete files\n\nIMPORTANT WORKFLOW:\n1. First use 'list_directory' with { "path": "/app" } to see the project structure\n2. Then use 'list_directory' with { "path": "/app/src" } to see source files\n3. React apps typically use .tsx or .ts files, not .js files\n4. Once you know the file structure, use 'read_file' to read files\n5. Use 'write_file' to create or update files\n6. Use 'execute_command' to run commands like 'npm install' or 'npm run dev'\n7. Use 'search_code' to find code patterns\n\nIf a file doesn't exist when you try to read it, check the directory structure first to find the correct path and file extension.`;
+    } else {
+      // No pod provided - need to start base image first
+      userMessage += `\n\nAvailable base images: ${Object.keys(baseImageMap).join(", ")}. If you need to start a base image deployment, call the 'start_base_image' tool with { "base_image": "react" } (or vue, angular, nextjs, nuxtjs, flutter, react-native, svelte).\n\nIMPORTANT WORKFLOW:\n1. After starting a base image, first use 'list_directory' with { "path": "/app" } to see the project structure\n2. Then use 'list_directory' with { "path": "/app/src" } to see source files\n3. React apps typically use .tsx or .ts files, not .js files\n4. Once you know the file structure, use 'read_file' to read files\n5. Use 'write_file' to create or update files\n6. Use 'execute_command' to run commands like 'npm install' or 'npm run dev'\n7. Use 'search_code' to find code patterns\n\nIf a file doesn't exist when you try to read it, check the directory structure first to find the correct path and file extension.`;
+    }
+
+    // initial message history
+    const messages: ChatCompletionMessageParam[] = [
+      { role: "system", content: systemMessage },
+      { role: "user", content: userMessage }
+    ];
+
+    const toolExecutions: any[] = []; // Track all tool executions
+    let iterationCount = 0;
+    const MAX_ITERATIONS = 20; // Prevent infinite loops
+    let hasMoreToolCalls = true;
+
+    // Keep processing tool calls until model returns a final response
+    while (hasMoreToolCalls) {
+      iterationCount++;
+      
+      if (iterationCount > MAX_ITERATIONS) {
+        console.error(`[STREAM-AGENT] Maximum iterations (${MAX_ITERATIONS}) reached. Breaking loop.`);
+        sendSSE(res, 'error', { message: `Maximum iterations (${MAX_ITERATIONS}) reached` });
+        res.end();
+        return;
+      }
+
+      console.log(`[STREAM-AGENT] Iteration ${iterationCount}: Calling model...`);
+
+      try {
+        // Call the model with streaming
+        const currentResponse = await openai.chat.completions.create({
+          model: MODEL,
+          messages,
+          tools,
+          tool_choice: "auto",
+          stream: true
+        });
+
+        // Initialize message accumulator for this iteration
+        let currentMessage: any = { 
+          role: "assistant" as const, 
+          content: "", 
+          tool_calls: [] 
+        };
+
+        // Process streaming chunks
+        for await (const chunk of currentResponse) {
+          const delta = chunk.choices?.[0]?.delta;
+          if (!delta) continue;
+          
+          // Accumulate content if present
+          if (delta.content) {
+            currentMessage.content = (currentMessage.content || "") + delta.content;
+            sendSSE(res, 'model_chunk', { content: delta.content });
+          }
+
+          // Accumulate tool calls
+          if (delta.tool_calls) {
+            for (const toolCallDelta of delta.tool_calls) {
+              const i = toolCallDelta.index;
+          
+              // Ensure array slot exists
+              if (!currentMessage.tool_calls[i]) {
+                currentMessage.tool_calls[i] = {
+                  id: "",
+                  type: "function" as const,
+                  function: { name: "", arguments: "" }
+                };
+              }
+          
+              const call = currentMessage.tool_calls[i];
+          
+              // ID (usually arrives once)
+              if (toolCallDelta.id) {
+                call.id = toolCallDelta.id;
+              }
+          
+              // Function name (may stream in parts)
+              if (toolCallDelta.function?.name) {
+                call.function.name += toolCallDelta.function.name;
+              }
+          
+              // Function arguments (always streams in many chunks)
+              if (toolCallDelta.function?.arguments) {
+                call.function.arguments += toolCallDelta.function.arguments;
+              }
+            }
+          }
+        }
+
+        // Check if we have tool calls to process
+        if (currentMessage.tool_calls && currentMessage.tool_calls.length > 0) {
+          console.log(`[STREAM-AGENT] Iteration ${iterationCount}: Processing ${currentMessage.tool_calls.length} tool call(s)`);
+
+          messages.push(currentMessage);
+          
+          sendSSE(res, 'tool_calls', { 
+            count: currentMessage.tool_calls.length,
+            calls: currentMessage.tool_calls.map((tc: any) => ({ 
+              id: tc.id, 
+              name: tc.function.name 
+            }))
+          });
+
+          // Process all tool calls
+          for (let toolCall of currentMessage.tool_calls) {
+            // Check if toolCall exists
+            if (!toolCall) {
+              continue; // Skip invalid tool calls
+            }
+            
+            // Type guard: check if it's a function tool call (not custom)
+            if (toolCall.type !== 'function') {
+              sendSSE(res, 'error', { message: "Only function tool calls are supported" });
+              res.end();
+              return;
+            }
+            
+            const fnName = toolCall.function.name;
+            const rawArgs = toolCall.function.arguments || "{}";
+            
+            let args: any = {};
+            try { 
+              args = JSON.parse(rawArgs); 
+            } catch (e) {
+              args = { path: rawArgs }; // fallback if model returned plain string
+            }
+
+            sendSSE(res, 'tool_start', { function: fnName, args });
+
+            let toolResult;
+            
+            if (fnName === "start_base_image") {
+              const baseImage = args.base_image;
+              const deploymentName = args.name;
+              
+              // Validate base_image exists in baseImageMap
+              if (!baseImageMap[baseImage]) {
+                toolResult = `__ERROR__: Invalid base image "${baseImage}". Available options: ${Object.keys(baseImageMap).join(", ")}`;
+              } else {
+                // Call helper function to start deployment and service, get pod name, uniqueId, and domain
+                const result = await startBaseImageDeployment(baseImage, deploymentName, namespace);
+                podName = result.podName;
+                
+                toolResult = `Base image deployment started successfully. Pod name: ${result.podName}. Access your app at: ${result.domain}`;
+                
+                // Track execution for response
+                toolExecutions.push({ 
+                  function: fnName, 
+                  args, 
+                  podName: result.podName,
+                  uniqueId: result.uniqueId,
+                  domain: result.domain
+                });
+
+                sendSSE(res, 'pod_created', { 
+                  podName: result.podName,
+                  uniqueId: result.uniqueId,
+                  domain: result.domain
+                });
+              }
+            }
+            else if (!podName) {
+              toolResult = "__ERROR__: No pod available. Please start a base image deployment first using the 'start_base_image' tool.";
+            } 
+            else if (fnName === "read_file") {
+              const filePath = args.path;
+              // execute the tool (read file from pod)
+              toolResult = await readFileFromPod(podName, namespace, filePath);
+              
+              // Track execution for response
+              toolExecutions.push({ 
+                function: fnName, 
+                args, 
+                filePreview: toolResult.slice(0, 1000) 
+              });
+            } 
+            else if (fnName === 'write_file') {
+              const filePath = args.path;
+              const fileContent = args.content;
+              
+              // execute the tool (write file to pod)
+              toolResult = await writeFileInPod(podName, namespace, filePath, fileContent);
+              console.log(`[STREAM-AGENT] [WRITE_FILE] Result: ${toolResult}`);
+              
+              // Track execution for response
+              toolExecutions.push({ 
+                function: fnName, 
+                args, 
+                result: toolResult 
+              });
+            }
+            else if (fnName === 'list_directory') {
+              const dirPath = args.path || '/app';
+              
+              // execute the tool (list directory in pod)
+              toolResult = await listDirectoryInPod(podName, namespace, dirPath);
+              console.log(`[STREAM-AGENT] [LIST_DIRECTORY] Path: ${dirPath}`);
+              console.log(`[STREAM-AGENT] [LIST_DIRECTORY] Result: ${toolResult.slice(0, 500)}...`);
+              
+              // Track execution for response
+              toolExecutions.push({ 
+                function: fnName, 
+                args, 
+                result: toolResult 
+              });
+            }
+            else if (fnName === 'execute_command') {
+              const command = args.command;
+              const workingDir = args.working_directory || '/app';
+              
+              // execute the tool (run command in pod)
+              toolResult = await executeCommandInPod(podName, namespace, command, workingDir);
+              console.log(`[STREAM-AGENT] [EXECUTE_COMMAND] Command: ${command}, Working Dir: ${workingDir}`);
+              console.log(`[STREAM-AGENT] [EXECUTE_COMMAND] Result: ${toolResult.slice(0, 500)}...`);
+              
+              // Track execution for response
+              toolExecutions.push({ 
+                function: fnName, 
+                args, 
+                result: toolResult 
+              });
+            }
+            else if (fnName === 'search_code') {
+              const query = args.query;
+              const searchPath = args.path || '/app';
+              
+              // execute the tool (search code in pod)
+              toolResult = await searchCodeInPod(podName, namespace, query, searchPath);
+              console.log(`[STREAM-AGENT] [SEARCH_CODE] Query: ${query}, Path: ${searchPath}`);
+              console.log(`[STREAM-AGENT] [SEARCH_CODE] Result: ${toolResult.slice(0, 500)}...`);
+              
+              // Track execution for response
+              toolExecutions.push({ 
+                function: fnName, 
+                args, 
+                result: toolResult 
+              });
+            }
+            else if (fnName === 'delete_file') {
+              const filePath = args.path;
+              
+              // execute the tool (delete file from pod)
+              toolResult = await deleteFileInPod(podName, namespace, filePath);
+              console.log(`[STREAM-AGENT] [DELETE_FILE] Path: ${filePath}`);
+              console.log(`[STREAM-AGENT] [DELETE_FILE] Result: ${toolResult}`);
+              
+              // Track execution for response
+              toolExecutions.push({ 
+                function: fnName, 
+                args, 
+                result: toolResult 
+              });
+            }
+            else {
+              sendSSE(res, 'error', { message: `Unknown tool requested: ${fnName}` });
+              res.end();
+              return;
+            }
+
+            // Add the tool result into the messages with role "tool"
+            messages.push({
+              role: "tool",
+              tool_call_id: toolCall.id,  // Required for tool responses
+              content: toolResult
+            });
+
+            sendSSE(res, 'tool_result', { 
+              function: fnName, 
+              result: toolResult.slice(0, 500) // Preview of result
+            });
+          }
+        } else {
+          // No more tool calls - this is the final response
+          console.log(`[STREAM-AGENT] Completed: ${iterationCount} iteration(s), ${toolExecutions.length} tool execution(s)`);
+          
+          // Add final message to history
+          if (currentMessage.content || currentMessage.tool_calls?.length === 0) {
+            messages.push(currentMessage);
+          }
+          
+          sendSSE(res, 'complete', { 
+            message: 'Agent completed',
+            iterations: iterationCount,
+            toolExecutions: toolExecutions.length,
+            finalResponse: currentMessage.content || "No response content",
+            toolExecution: toolExecutions.length === 1 
+              ? toolExecutions[0] 
+              : toolExecutions
+          });
+          
+          hasMoreToolCalls = false;
+        }
+      } catch (apiError) {
+        console.error(`[STREAM-AGENT] API call failed:`, apiError);
+        const errorMessage = apiError instanceof Error ? apiError.message : String(apiError);
+        sendSSE(res, 'error', { 
+          message: `OpenAI API call failed: ${errorMessage}`,
+          toolExecution: toolExecutions 
+        });
+        res.end();
+        return;
+      }
+    }
+
+    res.end();
+  } catch (err) {
+    console.error(`[STREAM-AGENT] ERROR:`, err);
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    try {
+      sendSSE(res, 'error', { message: errorMessage });
+      res.end();
+    } catch (sendError) {
+      // Response might already be closed
+      console.error(`[STREAM-AGENT] Failed to send error: ${sendError instanceof Error ? sendError.message : String(sendError)}`);
+      res.end();
+    }
+  }
+});
+
+app.post("/stream-dummy", async (req, res) => {
+  console.log(`[STREAM-DUMMY] New request received at ${new Date().toISOString()}`);
+  
+  // Set headers immediately for SSE
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+
+  // TODO: Comment this out after pod is started
+  const namespace = process.env.NAMESPACE || "default";
+  // try {
+  //   console.log(`[STREAM-DUMMY] Starting React base image pod...`);
+  //   const result = await startBaseImageDeployment("react", undefined, namespace);
+  //   console.log(`[STREAM-DUMMY] React pod started: ${result.podName}, domain: ${result.domain}`);
+  // } catch (error) {
+  //   console.error(`[STREAM-DUMMY] Failed to start React pod:`, error);
+  // }
+
+  const podName = req.body.podName;
+  const appTsxPath = req.body.filePath || "/app/src/App.tsx";
+
+  if (!podName) {
+    sendSSE(res, 'error', { message: 'podName is required' });
+    res.end();
+    return;
+  }
+
+  try {
+    sendSSE(res, 'status', { message: 'Starting dummy stream...' });
+    sendSSE(res, 'pod_found', { podName, source: 'provided' });
+
+    // Read current App.tsx to get its structure
+    sendSSE(res, 'status', { message: 'Reading current App.tsx...' });
+    let currentAppContent = "";
+    try {
+      currentAppContent = await readFileFromPod(podName, namespace, appTsxPath);
+      sendSSE(res, 'file_read', { path: appTsxPath, preview: currentAppContent.slice(0, 200) });
+    } catch (err) {
+      // If file doesn't exist, create a basic React component structure
+      console.log(`[STREAM-DUMMY] File not found, creating new App.tsx`);
+      currentAppContent = `import { useState, useEffect } from 'react';
+
+function App() {
+  const [numbers, setNumbers] = useState<number[]>([]);
+
+  return (
+    <div style={{ padding: '20px', fontFamily: 'Arial' }}>
+      <h1>Streaming Test</h1>
+      <div style={{ 
+        display: 'grid', 
+        gridTemplateColumns: 'repeat(10, 1fr)', 
+        gap: '10px',
+        marginTop: '20px'
+      }}>
+        {numbers.map((num) => (
+          <div 
+            key={num} 
+            style={{ 
+              padding: '10px', 
+              background: '#007bff', 
+              color: 'white', 
+              borderRadius: '5px',
+              textAlign: 'center'
+            }}
+          >
+            {num}
+          </div>
+        ))}
+      </div>
+      {numbers.length === 100 && (
+        <p style={{ marginTop: '20px', color: 'green' }}>
+          ✅ Stream completed! Received all 100 numbers.
+        </p>
+      )}
+    </div>
+  );
+}
+
+export default App;`;
+    }
+
+    // Extract the numbers array initialization if it exists, otherwise start fresh
+    let numbersArray: number[] = [];
+    
+    // Write numbers 1-100 incrementally
+    for (let i = 1; i <= 100; i++) {
+      numbersArray.push(i);
+      
+      // Create the updated App.tsx content with current numbers
+      const updatedAppContent = `import { useState, useEffect } from 'react';
+
+function App() {
+  const [numbers] = useState<number[]>([${numbersArray.join(', ')}]);
+
+  return (
+    <div style={{ padding: '20px', fontFamily: 'Arial' }}>
+      <h1>Streaming Test</h1>
+      <p>Status: 🟢 Connected - Received ${numbersArray.length}/100 numbers</p>
+      <div style={{ 
+        display: 'grid', 
+        gridTemplateColumns: 'repeat(10, 1fr)', 
+        gap: '10px',
+        marginTop: '20px'
+      }}>
+        {numbers.map((num) => (
+          <div 
+            key={num} 
+            style={{ 
+              padding: '10px', 
+              background: '#007bff', 
+              color: 'white', 
+              borderRadius: '5px',
+              textAlign: 'center'
+            }}
+          >
+            {num}
+          </div>
+        ))}
+      </div>
+      {numbers.length === 100 && (
+        <p style={{ marginTop: '20px', color: 'green' }}>
+          ✅ Stream completed! Received all 100 numbers.
+        </p>
+      )}
+    </div>
+  );
+}
+
+export default App;`;
+
+      // Write the file
+      sendSSE(res, 'tool_start', { 
+        function: 'write_file', 
+        args: { path: appTsxPath, number: i } 
+      });
+      
+      const writeResult = await writeFileInPod(podName, namespace, appTsxPath, updatedAppContent);
+      
+      sendSSE(res, 'tool_result', { 
+        function: 'write_file', 
+        result: `Written number ${i} to App.tsx`,
+        number: i,
+        total: 100
+      });
+
+      sendSSE(res, 'model_chunk', { content: `Number ${i} written... ` });
+
+      // Wait 1 second before next write
+      if (i < 100) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
+
+    sendSSE(res, 'complete', { 
+      message: 'Dummy stream completed',
+      totalNumbers: 100,
+      filePath: appTsxPath
+    });
+
+    res.end();
+  } catch (err) {
+    console.error(`[STREAM-DUMMY] ERROR:`, err);
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    try {
+      sendSSE(res, 'error', { message: errorMessage });
+      res.end();
+    } catch (sendError) {
+      console.error(`[STREAM-DUMMY] Failed to send error: ${sendError instanceof Error ? sendError.message : String(sendError)}`);
+      res.end();
+    }
+  }
+});
 
 app.post("/sandbox", async (req, res) => {
   try {
@@ -708,17 +1240,22 @@ app.post("/sandbox", async (req, res) => {
     console.log("baseImage", baseImage);
     
     const id = randomUUID();
+    const domain = `${id}.lovableaiweb.info`;
     console.log("Deployment and service creation started...");
     
     const deploymentAndService = await createDeploymentAndServiceForBaseImage(
       id,
       baseImageMap[baseImage],
       1,
-      "default"
+      "default",
+      [
+        { name: "VITE_HMR_HOST", value: domain },
+        { name: "VITE_HMR_PORT", value: "80" },
+      ]
     );
     console.log("Deployment and service creation completed...");
     res.json({
-      url: `${id}.lovableaiweb.info`,
+      url: domain,
       deployment: deploymentAndService.deployment,
       service: deploymentAndService.service,
     });

@@ -4,6 +4,7 @@ import {
   AppsV1Api,
   V1Deployment,
   V1Service,
+  V1EnvVar,
 } from "@kubernetes/client-node";
 import fs from "fs";
 
@@ -49,16 +50,18 @@ export const k8sAppsApi = kc.makeApiClient(AppsV1Api);
 /**
  * Creates a deployment with react_base_img and a service for it
  * @param name - Deployment name (default: auto-generated)
- * @param image - Docker image name (default: "cryptocal/react_base_img:latest")
+ * @param image - Docker image name (default: "cryptocal/react_base_img:v1.0.0")
  * @param replicas - Number of replicas (default: 1)
  * @param namespace - Kubernetes namespace (default: "default")
+ * @param extraEnv - Additional environment variables to inject into the container
  * @returns Promise with deployment and service details
  */
 export async function createDeploymentAndServiceForBaseImage(
   name?: string,
-  image: string = "cryptocal/react_base_img:latest",
+  image: string = "cryptocal/react_base_img:v1.0.0",
   replicas: number = 1,
-  namespace: string = "default"
+  namespace: string = "default",
+  extraEnv: V1EnvVar[] = []
 ) {
   const deploymentName = name || `image-${Date.now()}`;
 
@@ -93,6 +96,7 @@ export async function createDeploymentAndServiceForBaseImage(
                   containerPort: 5173,
                 },
               ],
+              env: extraEnv,
             },
           ],
         },

@@ -6,10 +6,13 @@ metadata:
 data:
   Caddyfile: |
     http://*.lovableaiweb.info {
+      log {
+        output stdout
+        format console
+      }
       reverse_proxy service-{http.request.host.labels.2}.default.svc.cluster.local:5173
     }
 
     http://lovableaiweb.info {
       respond "Welcome to Caddy Gateway!!!!" 200
     }
-
