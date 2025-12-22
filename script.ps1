@@ -1,5 +1,5 @@
 # Set kubeconfig
-$env:KUBECONFIG = "C:\Users\ws_htu1820\Downloads\k8s-1-34-1-do-1-blr1-1765277922438-kubeconfig.yaml"
+$env:KUBECONFIG = "C:\Users\ws_htu1820\Downloads\k8s-1-34-1-do-2-blr1-1766330670951-kubeconfig.yaml"
 # Apply manifests 
 kubectl apply -f caddy-configmap.yml
 kubectl apply -f caddy.deployment.yml
