@@ -38,7 +38,7 @@ async function sendToLLM(prompt: string){
 }
 
 const baseImageMap: Record<string, string> = {
-  "react": "cryptocal/react_base_img:v1.0.0",
+  "react": "cryptocal/react_base_img:latest",
   "react-native": "cryptocal/react-native_base_img:latest",
   "flutter": "cryptocal/flutter_base_img:latest",
   "vue": "cryptocal/vue_base_img:latest",
